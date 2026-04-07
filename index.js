@@ -96,6 +96,15 @@
 
     function applyStreamingSpoilers(mesText) {
         if (!mesText.innerHTML.includes('||')) return;
+
+        // Snapshot which spoiler indices are currently revealed BEFORE we nuke
+        // the DOM.  Spans are always emitted in source order, so index is a
+        // stable identity across successive innerHTML rewrites.
+        const revealed = new Set();
+        mesText.querySelectorAll('.ds-spoiler').forEach((el, i) => {
+            if (el.classList.contains('ds-spoiler--revealed')) revealed.add(i);
+        });
+
         // Disconnect first so our own write doesn't re-trigger the observer
         streamObserver.disconnect();
         mesText.innerHTML = mesText.innerHTML
@@ -112,6 +121,16 @@
                 /\|\|(.+)/gs,
                 '<span class="ds-spoiler ds-spoiler--streaming" title="Click to reveal spoiler">$1</span>'
             );
+
+        // Restore revealed state onto the freshly-created spans so that a
+        // user clicking mid-stream doesn't get their reveal wiped on the
+        // next token.
+        if (revealed.size > 0) {
+            mesText.querySelectorAll('.ds-spoiler').forEach((el, i) => {
+                if (revealed.has(i)) el.classList.add('ds-spoiler--revealed');
+            });
+        }
+
         // Reconnect to watch the next token
         streamObserver.observe(mesText, { childList: true, subtree: true, characterData: true });
     }
