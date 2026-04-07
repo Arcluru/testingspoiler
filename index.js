@@ -47,10 +47,6 @@
                 span.title = 'Click to reveal spoiler';
                 span.setAttribute('aria-label', 'Spoiler — click to reveal');
                 span.textContent = match[1];
-                span.addEventListener('click', function () {
-                    this.classList.toggle('ds-spoiler--revealed');
-                });
-
                 fragment.appendChild(span);
                 lastIndex = match.index + match[0].length;
             }
@@ -149,6 +145,21 @@
         }
     }
 
+    // ─── Delegated click handler ──────────────────────────────────────────────
+    //
+    // Attached once to #chat (or document as fallback).  Catches clicks on
+    // every .ds-spoiler regardless of when or how the span was created —
+    // innerHTML streaming spans included — and survives innerHTML rewrites.
+
+    function attachDelegatedClick() {
+        const root = document.getElementById('chat') || document;
+        root.addEventListener('click', function (e) {
+            const spoiler = e.target.closest('.ds-spoiler');
+            if (!spoiler) return;
+            spoiler.classList.toggle('ds-spoiler--revealed');
+        });
+    }
+
     // ─── Event registration ───────────────────────────────────────────────────
 
     let retryCount = 0;
@@ -210,8 +221,12 @@
     // ─── Entry point ──────────────────────────────────────────────────────────
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', registerEvents);
+        document.addEventListener('DOMContentLoaded', () => {
+            attachDelegatedClick();
+            registerEvents();
+        });
     } else {
+        attachDelegatedClick();
         registerEvents();
     }
 
