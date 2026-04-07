@@ -8,18 +8,16 @@
 
     const SPOILER_SOURCE  = '\\|\\|(.+?)\\|\\|';
     const SPOILER_FLAGS   = 'gs';
-    const PROCESSED_ATTR  = 'data-ds-done';   // set on .mes after processing
-    const MAX_RETRIES     = 20;               // give up after 10 s (20 × 500 ms)
+    const PROCESSED_ATTR  = 'data-ds-done';
+    const MAX_RETRIES     = 20;
 
     // ─── Core: text-node walker ───────────────────────────────────────────────
     //
-    // We walk raw TEXT NODES instead of replacing innerHTML. This avoids:
-    //   • double HTML-entity encoding (innerHTML already has &amp; etc.)
-    //   • regex matching across HTML tag boundaries
-    //   • nuking the entire DOM subtree (and any revealed-state classes)
+    // Used for final processing once a message is complete.
+    // Walking text nodes avoids double-encoding, cross-tag matching,
+    // and nuking revealed-state classes.
 
     function processMesText(mesText) {
-        // Collect text nodes first — modifying the DOM while walking it is unsafe
         const textNodes = [];
         const walker = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
         let node;
@@ -27,7 +25,7 @@
             if (node.nodeValue.includes('||')) textNodes.push(node);
         }
 
-        if (textNodes.length === 0) return false; // nothing to do
+        if (textNodes.length === 0) return false;
 
         textNodes.forEach(textNode => {
             const raw = textNode.nodeValue;
@@ -35,24 +33,20 @@
             let lastIndex = 0;
             let match;
 
-            // Recreate the regex per call so lastIndex never bleeds between runs
             const re = new RegExp(SPOILER_SOURCE, SPOILER_FLAGS);
 
             while ((match = re.exec(raw)) !== null) {
-                // Text before this match
                 if (match.index > lastIndex) {
                     fragment.appendChild(
                         document.createTextNode(raw.slice(lastIndex, match.index))
                     );
                 }
 
-                // Build the spoiler span via DOM API.
-                // textContent handles all escaping automatically — no manual &amp; needed.
                 const span = document.createElement('span');
                 span.className = 'ds-spoiler';
                 span.title = 'Click to reveal spoiler';
                 span.setAttribute('aria-label', 'Spoiler — click to reveal');
-                span.textContent = match[1]; // safe: DOM sets text, not HTML
+                span.textContent = match[1];
                 span.addEventListener('click', function () {
                     this.classList.toggle('ds-spoiler--revealed');
                 });
@@ -61,7 +55,6 @@
                 lastIndex = match.index + match[0].length;
             }
 
-            // Remaining text after the last match
             if (lastIndex < raw.length) {
                 fragment.appendChild(document.createTextNode(raw.slice(lastIndex)));
             }
@@ -72,46 +65,78 @@
         return true;
     }
 
-    // ─── Per-message processing ───────────────────────────────────────────────
+    // ─── Per-message processing (final, post-stream) ──────────────────────────
 
     function processMessage(mes) {
-        // Skip messages we've already fully processed.
-        // This preserves the revealed/hidden state of existing spoilers
-        // when new messages arrive later.
         if (mes.hasAttribute(PROCESSED_ATTR)) return;
 
         const mesText = mes.querySelector('.mes_text');
         if (!mesText) return;
 
-        // Quick bail-out before doing any DOM work
         if (!mesText.textContent.includes('||')) return;
 
         const changed = processMesText(mesText);
-
-        // Mark done only after a successful pass so streaming messages
-        // (which are rebuilt by ST on every token) stay eligible for re-processing
-        // until the stream ends and the final render stabilises.
-        if (changed) {
-            mes.setAttribute(PROCESSED_ATTR, '1');
-        }
+        if (changed) mes.setAttribute(PROCESSED_ATTR, '1');
     }
-
-    // ─── Scan helpers ─────────────────────────────────────────────────────────
 
     function processAllMessages() {
         document.querySelectorAll('#chat .mes').forEach(processMessage);
     }
 
-    // During streaming ST replaces the last message's innerHTML on every token.
-    // Only re-scan the last message in those cases — don't walk the whole history.
-    function processLastMessage() {
+    // ─── Streaming: MutationObserver approach ────────────────────────────────
+    //
+    // The problem with STREAM_TOKEN_RECEIVED + setTimeout:
+    //   ST rewrites innerHTML on every token → our spans get nuked → flicker.
+    //
+    // MutationObserver fires synchronously after the DOM is written but
+    // BEFORE the browser paints, so we can hide spoilers in the same frame
+    // as ST's update — zero visible gap.
+    //
+    // During streaming we use a fast innerHTML regex (fine here because
+    // we're replacing raw ||text|| that ST just wrote, not stable DOM).
+    // The final clean DOM-safe pass runs via processMesText once streaming ends.
+
+    let streamObserver = null;
+
+    function applyStreamingSpoilers(mesText) {
+        if (!mesText.innerHTML.includes('||')) return;
+        // Disconnect first so our own write doesn't re-trigger the observer
+        streamObserver.disconnect();
+        mesText.innerHTML = mesText.innerHTML.replace(
+            /\|\|(.+?)\|\|/gs,
+            '<span class="ds-spoiler" title="Click to reveal spoiler">$1</span>'
+        );
+        // Reconnect to watch the next token
+        streamObserver.observe(mesText, { childList: true, subtree: true, characterData: true });
+    }
+
+    function startStreamObserver() {
+        stopStreamObserver();
+
         const messages = document.querySelectorAll('#chat .mes');
-        if (messages.length === 0) return;
+        if (!messages.length) return;
 
         const last = messages[messages.length - 1];
-        // Remove the done-marker so the streaming message is always re-evaluated
         last.removeAttribute(PROCESSED_ATTR);
-        processMessage(last);
+
+        const mesText = last.querySelector('.mes_text');
+        if (!mesText) return;
+
+        streamObserver = new MutationObserver(() => {
+            applyStreamingSpoilers(mesText);
+        });
+
+        streamObserver.observe(mesText, { childList: true, subtree: true, characterData: true });
+
+        // Handle any spoilers already present when streaming starts
+        applyStreamingSpoilers(mesText);
+    }
+
+    function stopStreamObserver() {
+        if (streamObserver) {
+            streamObserver.disconnect();
+            streamObserver = null;
+        }
     }
 
     // ─── Event registration ───────────────────────────────────────────────────
@@ -133,34 +158,31 @@
 
         const { eventSource, event_types } = ctx;
 
-        // Fired once when a full character message finishes rendering
+        // Stream finished — stop observer, do the final clean DOM-safe pass
         eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, () => {
+            stopStreamObserver();
             setTimeout(processAllMessages, 50);
         });
 
-        // Fired once when a user message finishes rendering
         eventSource.on(event_types.USER_MESSAGE_RENDERED, () => {
             setTimeout(processAllMessages, 50);
         });
 
-        // Fired repeatedly during streaming — only touch the last message
+        // First streaming token — attach observer once, it stays until stream ends
         if (event_types.STREAM_TOKEN_RECEIVED) {
             eventSource.on(event_types.STREAM_TOKEN_RECEIVED, () => {
-                setTimeout(processLastMessage, 50);
+                if (!streamObserver) startStreamObserver();
             });
         }
 
-        // Fired when a swipe / regeneration updates a message in place
         if (event_types.MESSAGE_SWIPED) {
             eventSource.on(event_types.MESSAGE_SWIPED, () => {
                 setTimeout(processAllMessages, 50);
             });
         }
 
-        // Fired when the user edits a message and saves it
         if (event_types.MESSAGE_EDITED) {
             eventSource.on(event_types.MESSAGE_EDITED, () => {
-                // Clear all done-markers so edited messages are re-evaluated
                 document.querySelectorAll(`#chat .mes[${PROCESSED_ATTR}]`).forEach(mes => {
                     mes.removeAttribute(PROCESSED_ATTR);
                 });
@@ -168,7 +190,6 @@
             });
         }
 
-        // Re-process everything when a different chat is loaded
         eventSource.on(event_types.CHAT_CHANGED, () => {
             setTimeout(processAllMessages, 200);
         });
@@ -184,7 +205,6 @@
         registerEvents();
     }
 
-    // Initial sweep for messages already in the DOM on extension load
     setTimeout(processAllMessages, 1000);
 
 })();
