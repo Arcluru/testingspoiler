@@ -27,6 +27,13 @@
     background-color: rgba(255, 255, 255, 0.18);
 }
 
+/* In-progress spoiler during streaming — visually identical to the hidden state.
+   The class is replaced by ds-spoiler alone once the closing || arrives and
+   Pass 1 picks it up as a complete pair on the next mutation tick. */
+.ds-spoiler--streaming {
+    /* inherits all .ds-spoiler rules; nothing extra needed */
+}
+
 /* Revealed state */
 .ds-spoiler--revealed {
     background-color: rgba(255, 255, 255, 0.12);
