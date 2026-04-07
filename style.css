@@ -1,0 +1,41 @@
+/* ============================================================
+   Discord Spoiler Tags — SillyTavern Extension Styles
+   ============================================================ */
+
+.ds-spoiler {
+    /* Hidden state: opaque dark pill, just like Discord */
+    display: inline;
+    background-color: rgba(255, 255, 255, 0.1);
+    color: transparent;                  /* hide the text */
+    border-radius: 3px;
+    padding: 0 3px;
+    cursor: pointer;
+    user-select: none;
+    transition:
+        background-color 0.15s ease,
+        color 0.15s ease;
+
+    /* Keep the spoiler block from collapsing when empty-looking */
+    min-width: 1ch;
+
+    /* Subtle outline so users know something is hidden */
+    outline: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+/* Hover hint — darken slightly so the user knows it's clickable */
+.ds-spoiler:hover {
+    background-color: rgba(255, 255, 255, 0.18);
+}
+
+/* Revealed state */
+.ds-spoiler--revealed {
+    background-color: rgba(255, 255, 255, 0.12);
+    color: inherit;                      /* show the text */
+    cursor: pointer;                     /* still clickable to re-hide */
+    outline: none;
+}
+
+/* Re-hover on revealed — give a faint "hide again" hint */
+.ds-spoiler--revealed:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+}
