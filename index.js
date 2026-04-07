@@ -157,6 +157,17 @@
             });
         }
 
+        // Fired when the user edits a message and saves it
+        if (event_types.MESSAGE_EDITED) {
+            eventSource.on(event_types.MESSAGE_EDITED, () => {
+                // Clear all done-markers so edited messages are re-evaluated
+                document.querySelectorAll(`#chat .mes[${PROCESSED_ATTR}]`).forEach(mes => {
+                    mes.removeAttribute(PROCESSED_ATTR);
+                });
+                setTimeout(processAllMessages, 50);
+            });
+        }
+
         // Re-process everything when a different chat is loaded
         eventSource.on(event_types.CHAT_CHANGED, () => {
             setTimeout(processAllMessages, 200);
