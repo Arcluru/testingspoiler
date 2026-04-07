@@ -102,10 +102,20 @@
         if (!mesText.innerHTML.includes('||')) return;
         // Disconnect first so our own write doesn't re-trigger the observer
         streamObserver.disconnect();
-        mesText.innerHTML = mesText.innerHTML.replace(
-            /\|\|(.+?)\|\|/gs,
-            '<span class="ds-spoiler" title="Click to reveal spoiler">$1</span>'
-        );
+        mesText.innerHTML = mesText.innerHTML
+            // Pass 1: complete pairs  ||...||
+            .replace(
+                /\|\|(.+?)\|\|/gs,
+                '<span class="ds-spoiler" title="Click to reveal spoiler">$1</span>'
+            )
+            // Pass 2: unclosed opening ||  — hides everything after it while
+            // the AI is still streaming the rest of the spoiler content.
+            // Any || left at this point is guaranteed to be unpaired because
+            // Pass 1 already consumed all complete pairs.
+            .replace(
+                /\|\|(.+)/gs,
+                '<span class="ds-spoiler ds-spoiler--streaming" title="Click to reveal spoiler">$1</span>'
+            );
         // Reconnect to watch the next token
         streamObserver.observe(mesText, { childList: true, subtree: true, characterData: true });
     }
