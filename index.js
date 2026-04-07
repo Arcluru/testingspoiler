@@ -11,6 +11,21 @@
     const PROCESSED_ATTR  = 'data-ds-done';
     const MAX_RETRIES     = 20;
 
+    // ─── Revealed-state registry ──────────────────────────────────────────────
+    //
+    // SillyTavern fully rewrites mesText.innerHTML on every streaming token,
+    // destroying any spans we created the previous tick — including their
+    // class lists.  We therefore CANNOT read revealed state from the DOM
+    // inside applyStreamingSpoilers; those elements are already gone.
+    //
+    // Instead we maintain a module-level Set that is written at click time
+    // (before ST touches anything) and read each time we recreate the spans.
+    // Key = trimmed text content of the spoiler, which is stable for complete
+    // ||...|| pairs.  The set is cleared when streaming ends so it doesn't
+    // bleed into the next message.
+
+    const revealedSpoilers = new Set();
+
     // ─── Core: text-node walker ───────────────────────────────────────────────
     //
     // Used for final processing once a message is complete.
@@ -47,6 +62,7 @@
                 span.title = 'Click to reveal spoiler';
                 span.setAttribute('aria-label', 'Spoiler — click to reveal');
                 span.textContent = match[1];
+
                 fragment.appendChild(span);
                 lastIndex = match.index + match[0].length;
             }
@@ -91,43 +107,40 @@
     // During streaming we use a fast innerHTML regex (fine here because
     // we're replacing raw ||text|| that ST just wrote, not stable DOM).
     // The final clean DOM-safe pass runs via processMesText once streaming ends.
+    //
+    // Revealed state is NOT read from the DOM here — ST already destroyed those
+    // spans before this function runs.  We restore from revealedSpoilers instead,
+    // which is populated by the click handler the moment the user clicks.
 
     let streamObserver = null;
 
     function applyStreamingSpoilers(mesText) {
         if (!mesText.innerHTML.includes('||')) return;
 
-        // Snapshot which spoiler indices are currently revealed BEFORE we nuke
-        // the DOM.  Spans are always emitted in source order, so index is a
-        // stable identity across successive innerHTML rewrites.
-        const revealed = new Set();
-        mesText.querySelectorAll('.ds-spoiler').forEach((el, i) => {
-            if (el.classList.contains('ds-spoiler--revealed')) revealed.add(i);
-        });
-
         // Disconnect first so our own write doesn't re-trigger the observer
         streamObserver.disconnect();
+
         mesText.innerHTML = mesText.innerHTML
             // Pass 1: complete pairs  ||...||
             .replace(
                 /\|\|(.+?)\|\|/gs,
                 '<span class="ds-spoiler" title="Click to reveal spoiler">$1</span>'
             )
-            // Pass 2: unclosed opening ||  — hides everything after it while
-            // the AI is still streaming the rest of the spoiler content.
-            // Any || left at this point is guaranteed to be unpaired because
-            // Pass 1 already consumed all complete pairs.
+            // Pass 2: unclosed opening || — hides everything after it while
+            // the AI is still streaming.  Any || left here is guaranteed
+            // unpaired because Pass 1 already consumed all complete pairs.
             .replace(
                 /\|\|(.+)/gs,
                 '<span class="ds-spoiler ds-spoiler--streaming" title="Click to reveal spoiler">$1</span>'
             );
 
-        // Restore revealed state onto the freshly-created spans so that a
-        // user clicking mid-stream doesn't get their reveal wiped on the
-        // next token.
-        if (revealed.size > 0) {
-            mesText.querySelectorAll('.ds-spoiler').forEach((el, i) => {
-                if (revealed.has(i)) el.classList.add('ds-spoiler--revealed');
+        // Restore revealed state from our persistent registry.
+        // We key on trimmed textContent, which is stable for complete pairs.
+        if (revealedSpoilers.size > 0) {
+            mesText.querySelectorAll('.ds-spoiler').forEach(el => {
+                if (revealedSpoilers.has(el.textContent.trim())) {
+                    el.classList.add('ds-spoiler--revealed');
+                }
             });
         }
 
@@ -162,6 +175,8 @@
             streamObserver.disconnect();
             streamObserver = null;
         }
+        // Clear the registry so revealed state doesn't bleed into the next message
+        revealedSpoilers.clear();
     }
 
     // ─── Delegated click handler ──────────────────────────────────────────────
@@ -169,13 +184,24 @@
     // Attached once to #chat (or document as fallback).  Catches clicks on
     // every .ds-spoiler regardless of when or how the span was created —
     // innerHTML streaming spans included — and survives innerHTML rewrites.
+    //
+    // The click handler is also the WRITE path for revealedSpoilers.
+    // We record state here, at click time, before ST can wipe the DOM.
 
     function attachDelegatedClick() {
         const root = document.getElementById('chat') || document;
         root.addEventListener('click', function (e) {
             const spoiler = e.target.closest('.ds-spoiler');
             if (!spoiler) return;
+
             spoiler.classList.toggle('ds-spoiler--revealed');
+            const key = spoiler.textContent.trim();
+
+            if (spoiler.classList.contains('ds-spoiler--revealed')) {
+                revealedSpoilers.add(key);
+            } else {
+                revealedSpoilers.delete(key);
+            }
         });
     }
 
