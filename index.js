@@ -21,25 +21,32 @@
     // Instead we maintain a module-level Set that is written at click time
     // (before ST touches anything) and read each time we recreate the spans.
     // Key = trimmed text content of the spoiler, which is stable for complete
-    // ||...|| pairs.  The set is cleared when streaming ends so it doesn't
-    // bleed into the next message.
+    // ||...|| pairs.
+    //
+    // LIFECYCLE — this is the critical part:
+    //   • Written:  click handler, any time a spoiler is revealed/hidden.
+    //   • Read:     applyStreamingSpoilers (during streaming) and
+    //               processMessage (final DOM pass after streaming ends).
+    //   • Cleared:  at the END of processAllMessages, AFTER the final DOM pass
+    //               has already restored revealed state into the live spans.
+    //
+    // Previously the set was cleared inside stopStreamObserver, which runs
+    // ~50 ms BEFORE processAllMessages.  That meant the final DOM pass always
+    // saw an empty set and recreated every spoiler in the hidden state, causing
+    // revealed spoilers to snap shut the moment streaming finished.
 
     const revealedSpoilers = new Set();
 
     // ─── Interaction guard ────────────────────────────────────────────────────
     //
-    // In Chromium-based browsers, if the element under mousedown is removed from
-    // the DOM before mouseup fires, the browser cancels the click event entirely —
-    // it never reaches our delegated listener.  Because ST replaces innerHTML on
-    // every streaming token (potentially many times per second), the span the user
-    // pressed on gets destroyed between mousedown and mouseup, silently swallowing
-    // the click.
+    // In Chromium, if the element under mousedown is removed from the DOM before
+    // mouseup fires, the browser cancels the click event entirely.  Because ST
+    // replaces innerHTML on every streaming token, the span the user pressed on
+    // can be destroyed between mousedown and mouseup, swallowing the click.
     //
-    // We set this flag on mousedown (when the target is a spoiler) and clear it on
-    // mouseup.  applyStreamingSpoilers checks it and skips the innerHTML replacement
-    // while a click is in flight, keeping the span alive long enough for the browser
-    // to fire the click event.  The very next streaming token after mouseup will
-    // call applyStreamingSpoilers normally and restore revealed state from the Set.
+    // We set this flag on mousedown (when the target is a spoiler) and clear it
+    // on mouseup.  applyStreamingSpoilers skips the innerHTML replacement while
+    // the flag is set, keeping the span alive for the full click gesture.
 
     let userInteracting = false;
 
@@ -105,35 +112,30 @@
         if (!mesText.textContent.includes('||')) return;
 
         const changed = processMesText(mesText);
-        if (changed) mes.setAttribute(PROCESSED_ATTR, '1');
+        if (changed) {
+            mes.setAttribute(PROCESSED_ATTR, '1');
+
+            // Restore any spoilers the user revealed during streaming.
+            // revealedSpoilers still holds the keys at this point — it is not
+            // cleared until the end of processAllMessages, after this runs.
+            if (revealedSpoilers.size > 0) {
+                mesText.querySelectorAll('.ds-spoiler').forEach(el => {
+                    if (revealedSpoilers.has(el.textContent.trim())) {
+                        el.classList.add('ds-spoiler--revealed');
+                    }
+                });
+            }
+        }
     }
 
     function processAllMessages() {
         document.querySelectorAll('#chat .mes').forEach(processMessage);
+        // Clear only AFTER every processMessage call has had a chance to read
+        // the set and restore revealed state into the DOM.
+        revealedSpoilers.clear();
     }
 
     // ─── Streaming: MutationObserver approach ────────────────────────────────
-    //
-    // The MutationObserver fires on every streaming token that ST writes.
-    // Two problems arise if we call applyStreamingSpoilers on every single fire:
-    //
-    //   1. FLICKER ON HOVER — CSS transitions begin on the span, but the span is
-    //      immediately destroyed and recreated by the next innerHTML replacement,
-    //      causing rapid visual flashing whenever the pointer is over a spoiler.
-    //
-    //   2. CLICKS DON'T REGISTER — Chromium cancels a click when the mousedown
-    //      target is removed from the DOM before mouseup.  With replacements
-    //      happening many times per second, the span is almost always gone by
-    //      the time mouseup fires.
-    //
-    // Fix for (1): requestAnimationFrame throttle — no matter how many tokens
-    // arrive in one frame, we only replace innerHTML once per ~16 ms, making
-    // the span stable enough that CSS transitions can actually run.
-    //
-    // Fix for (2): userInteracting guard — when mousedown lands on a spoiler we
-    // skip the replacement until mouseup, guaranteeing the span survives the
-    // full click gesture.  The next token after mouseup does a normal replacement
-    // and restores revealed state from revealedSpoilers.
 
     let streamObserver = null;
     let rafPending     = false;
@@ -154,15 +156,13 @@
                 '<span class="ds-spoiler" title="Click to reveal spoiler">$1</span>'
             )
             // Pass 2: unclosed opening || — hides everything after it while
-            // the AI is still streaming.  Any || left here is guaranteed
-            // unpaired because Pass 1 already consumed all complete pairs.
+            // the AI is still streaming.
             .replace(
                 /\|\|(.+)/gs,
                 '<span class="ds-spoiler ds-spoiler--streaming" title="Click to reveal spoiler">$1</span>'
             );
 
         // Restore revealed state from our persistent registry.
-        // We key on trimmed textContent, which is stable for complete pairs.
         if (revealedSpoilers.size > 0) {
             mesText.querySelectorAll('.ds-spoiler').forEach(el => {
                 if (revealedSpoilers.has(el.textContent.trim())) {
@@ -189,8 +189,8 @@
 
         streamObserver = new MutationObserver(() => {
             // Throttle to one innerHTML replacement per animation frame.
-            // This eliminates hover flicker and keeps the span stable long
-            // enough for CSS transitions to render cleanly.
+            // This eliminates hover flicker and keeps spans stable enough
+            // for CSS transitions to render cleanly.
             if (rafPending) return;
             rafPending = true;
             requestAnimationFrame(() => {
@@ -211,18 +211,12 @@
             streamObserver = null;
         }
         rafPending = false;
-        // Clear the registry so revealed state doesn't bleed into the next message.
-        revealedSpoilers.clear();
+        // Do NOT clear revealedSpoilers here.  processAllMessages fires ~50 ms
+        // after this and needs the set intact to restore revealed state into the
+        // final DOM spans.  The clear happens at the end of processAllMessages.
     }
 
     // ─── Delegated click handler ──────────────────────────────────────────────
-    //
-    // Attached once to #chat (or document as fallback).  Catches clicks on
-    // every .ds-spoiler regardless of when or how the span was created —
-    // innerHTML streaming spans included — and survives innerHTML rewrites.
-    //
-    // mousedown/mouseup set the userInteracting guard described above.
-    // The click handler is also the WRITE path for revealedSpoilers.
 
     function attachDelegatedClick() {
         const root = document.getElementById('chat') || document;
@@ -234,14 +228,12 @@
             }
         });
 
-        // Always clear the guard on mouseup, even if the pointer drifted off
-        // the element — we want streaming to resume immediately after.
+        // Always clear on mouseup, even if the pointer drifted off the element.
         root.addEventListener('mouseup', function () {
             userInteracting = false;
         });
 
-        // Safety net: if mouseup fires outside #chat (e.g. user dragged out),
-        // clear the flag there too so we don't block streaming indefinitely.
+        // Safety net: if mouseup fires outside #chat, clear the flag there too.
         document.addEventListener('mouseup', function () {
             userInteracting = false;
         });
